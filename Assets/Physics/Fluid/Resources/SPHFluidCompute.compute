@@ -1,0 +1,224 @@
+// Based on https://matthias-research.github.io/pages/publications/sca03.pdf
+// Also used: https://www.youtube.com/watch?v=zbBwKMRyavE
+#pragma kernel Integrate
+#pragma kernel ComputeForces
+#pragma kernel ComputeDensityPressure
+#pragma kernel FindNeighbors
+
+// Mirrored representation of particle data on the cpu
+
+struct Particle
+{
+    float density, pressure;
+    float3 curForce, velocity, position;
+};
+
+// Particle buffers
+
+RWStructuredBuffer<Particle> particles;
+RWStructuredBuffer<int> neighbors;
+
+// Particle constants
+
+float particleMass;
+float viscosity;
+float gasConstant;
+float restDensity;
+float boundDamping;
+float radius, rad2, rad3, rad4, rad5;
+float pi;
+uint particleLength;
+float timestep;
+
+float3 boxCenter;
+float3 boxSize;
+
+uint particleComputeSize, particleComputeSize2;
+uint maxNeighbors;
+
+float3 spherePos;
+float sphereRad;
+
+// Find neighbors
+[numthreads(8, 8, 8)]
+void FindNeighbors(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x + id.y * particleComputeSize + id.z * particleComputeSize2;
+    
+    uint neighborIndex = index * maxNeighbors;
+    for (uint j = 0; j < maxNeighbors; j++)
+        neighbors[neighborIndex + j] = -1;
+    
+    for (uint i = 0; i < particleLength; i++)
+    {
+        if (distance(particles[index].position, particles[i].position) < radius * 2)
+        {
+            for (uint j = 0; j < maxNeighbors; j++)
+            {
+                if (neighbors[neighborIndex + j] == -1)
+                {
+                    neighbors[neighborIndex + j] = (int)i;
+                    break;
+                }
+            }
+        }
+        if (neighbors[neighborIndex + (maxNeighbors - 1)] != -1)
+            break;
+    }
+}
+
+// Integrates over positions and velocity of particles
+[numthreads(8, 8, 8)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x + id.y * particleComputeSize + id.z * particleComputeSize2;
+    
+    particles[index].curForce = max(length(particles[index].curForce), 10.0) * normalize(particles[index].curForce);
+    
+    Particle p = particles[index];
+    float3 vel = p.velocity + ((p.curForce / particleMass) * timestep);
+    particles[index].position += vel * timestep;
+    
+    // Check bounds
+    
+    float3 halfBox = boxSize / 2.0;
+    float3 boxMin = boxCenter - (boxSize / 2);
+    float3 boxMax = boxCenter + (boxSize / 2);
+    
+    int3 posSign = int3(sign(p.position.x), sign(p.position.y), sign(p.position.z));
+    posSign = int3(posSign.x == 0 ? 1 : posSign.x, posSign.y == 0 ? 1 : posSign.y, posSign.z == 0 ? 1 : posSign.z);
+    
+    if (abs(p.position.x - boxCenter.x) > halfBox.x)
+    {
+        particles[index].position.x = (halfBox.x - radius) * posSign.x + boxCenter.x;
+        vel.x *= -1 * boundDamping;
+    }
+    if (abs(p.position.y - boxCenter.y) > halfBox.y)
+    {
+        particles[index].position.y = (halfBox.y - radius) * posSign.y + boxCenter.y;
+        vel.y *= -1 * boundDamping;
+    }
+    if (abs(p.position.z - boxCenter.z) > halfBox.z)
+    {
+        particles[index].position.z = (halfBox.z - radius) * posSign.z + boxCenter.z;
+        vel.z *= -1 * boundDamping;
+    }
+    
+    //float3 minVec = bottomLeft + float3(radius, radius, radius);
+    //float3 maxVec = topRight - float3(radius, radius, radius);
+    //particles[index].position = float3(min(minVec.x, max(maxVec.x, p.position.x)), min(minVec.y, max(maxVec.y, p.position.y)), min(minVec.z, max(maxVec.z, p.position.z)));
+    
+    particles[index].velocity = vel;
+    
+    //particles[index].velocity = normalize(vel) * min(length(vel), 5.0);
+
+}
+
+// Define different smoothing functions for particle distance
+
+float SpikyKernelFirstDeriv(float distance)
+{
+    float x = 1.0 - distance / radius;
+    return -45.f / (pi * rad4) * x * x;
+}
+
+float SpikyKernelSecondDeriv(float distance)
+{
+    float x = 1.0 - distance / radius;
+    return 90.f / (pi * rad5) * x;
+}
+
+float3 SpikyKernelGradient(float distance, float3 direction)
+{
+    return SpikyKernelFirstDeriv(distance) * direction;
+}
+
+float StdKernel(float distanceSquared)
+{
+    float x = 1.0 - distanceSquared / rad2;
+    return 315.f / (64.f * pi * rad3) * x * x * x;
+}
+
+// Computes the forces acting on particles
+[numthreads(8, 8, 8)]
+void ComputeForces(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x + id.y * particleComputeSize + id.z * particleComputeSize2;
+    
+    float3 origin = particles[index].position;
+    float density2 = particles[index].density * particles[index].density;
+    float mass2 = particleMass * particleMass;
+    float3 pressure = float3(0, 0, 0);
+    float3 visc = float3(0, 0, 0);
+    
+    // Check particle's adjacent precalculated neighbors
+    
+    uint neighborStartIndex = index * maxNeighbors;
+    for (uint i = neighborStartIndex; i < neighborStartIndex + maxNeighbors; i++)
+    {
+        int neighborIndex = neighbors[i];
+        if (neighborIndex < 0)
+            break;
+        Particle particleB = particles[neighborIndex];
+                    
+        if (origin.x == particleB.position.x && origin.y == particleB.position.y && origin.z == particleB.position.z)
+            continue;
+        
+        float dist = distance(particleB.position, origin);
+        if (dist < radius * 2)
+        {
+            float3 pressureGradientDir = normalize(particles[index].position - particleB.position);
+            float3 pressureContribution = mass2 * SpikyKernelGradient(dist, pressureGradientDir);
+            pressureContribution *= (particles[index].pressure / density2 +
+                particleB.pressure / (particleB.density * particleB.density));
+
+            float3 viscosityContribution = viscosity * mass2 * (particleB.velocity - particles[index].velocity) / particleB.density;
+            viscosityContribution *= SpikyKernelSecondDeriv(dist);
+            
+            pressure += pressureContribution;
+            visc += viscosityContribution;
+        }
+    }
+    
+    particles[index].curForce = float3(0, -9.81 * particleMass, 0) - pressure + visc;
+    
+    float3 colDir = particles[index].position - spherePos;
+    if (length(colDir) < sphereRad)
+        particles[index].curForce += colDir * 300;
+}
+
+// Computes the density and pressure of and on the particles
+[numthreads(8, 8, 8)]
+void ComputeDensityPressure(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x + id.y * particleComputeSize + id.z * particleComputeSize2;
+    
+    float3 origin = particles[index].position;
+    float sum = 0;
+    
+    // Check particle's adjacent precalculated neighbors
+    
+    uint neighborStartIndex = index * maxNeighbors;
+    for (uint i = neighborStartIndex; i < neighborStartIndex + maxNeighbors; i++)
+    {
+        int neighborIndex = neighbors[i];
+        if (neighborIndex < 0)
+            break;
+        
+        float3 diff = origin - particles[neighborIndex].position;
+        float distSquared = dot(diff, diff);
+        
+        if (rad2 * 0.004 > distSquared * 0.004)
+        {
+            sum += StdKernel(distSquared * 0.004);
+        }
+    }
+    
+    // Assign particle density and pressure from summed values
+    
+    particles[index].density = sum * particleMass + 0.000001f;
+    particles[index].pressure = gasConstant * (particles[index].density - restDensity);
+    
+    if (particles[index].pressure < 0)
+        particles[index].pressure = 0;
+}

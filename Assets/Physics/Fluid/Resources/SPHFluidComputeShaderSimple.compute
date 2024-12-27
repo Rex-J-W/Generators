@@ -1,0 +1,300 @@
+// Based on https://matthias-research.github.io/pages/publications/sca03.pdf
+// Also used: https://www.youtube.com/watch?v=zbBwKMRyavE
+
+#pragma kernel Integrate2
+#pragma kernel ComputeForces2
+#pragma kernel ComputeDensityPressure2
+#pragma kernel HashParticles2
+#pragma kernel BitonicSort2
+#pragma kernel CalcCellOffsets2;
+
+// Mirrored representation of particle data on the cpu
+
+struct Particle
+{
+    float density, pressure;
+    float3 curForce, velocity, position;
+};
+
+// Particle buffers
+
+RWStructuredBuffer<Particle> particles;
+RWStructuredBuffer<uint> particleIndicies;
+RWStructuredBuffer<uint> particleCellIndicies;
+RWStructuredBuffer<uint> cellOffsets;
+
+// Particle constants
+
+float particleMass;
+float viscosity;
+float gasConstant;
+float restDensity;
+float boundDamping;
+float radius, rad2, rad3, rad4, rad5;
+float pi;
+uint particleLength;
+float timestep;
+float3 boxSize;
+
+// Bitonic sort params
+
+int block;
+int dim;
+
+// Gets the particle's cell from its current position
+int3 GetCell(float3 pos)
+{
+    float3 halfS = boxSize / 2;
+    return int3((pos.x + halfS.x) / radius, (pos.y + halfS.y) / radius, (pos.z + halfS.z) / radius);
+}
+
+// Hash function used in parallel later
+inline uint HashCell(in int3 cellIndex)
+{
+    const uint p1 = 73856093;
+    const uint p2 = 19349663;
+    const uint p3 = 83492791;
+    
+    uint n = (p1 * cellIndex.x) ^ (p2 * cellIndex.y) ^ (p3 * cellIndex.z);
+    n %= particleLength;
+    
+    return n;
+}
+
+// Hashes the particle indicies used for sorting
+[numthreads(256, 1, 1)]
+void HashParticles2(uint3 id : SV_DispatchThreadID)
+{
+    cellOffsets[id.x] = 99999999;
+    
+    uint particleIndex = particleIndicies[id.x];
+    particleCellIndicies[id.x] = HashCell(GetCell(particles[particleIndex].position));
+}
+
+// Sorts the particles using bitonic sort for faster processing
+[numthreads(256, 1, 1)]
+void BitonicSort2(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x + 256 * 1024;
+    uint j = i ^ block;
+    
+    if (j < i || i >= (uint) particleLength)
+        return;
+
+    uint key_i = particleIndicies[i];
+    uint key_j = particleIndicies[j];
+    uint val_i = particleCellIndicies[i];
+    uint val_j = particleCellIndicies[j];
+    
+    float diff = (val_i - val_j) * ((i & dim) == 0 ? 1 : -1);
+    if (diff > 0)
+    {
+        particleIndicies[i] = key_j;
+        particleIndicies[j] = key_i;
+    }
+}
+
+// Calculates the cell offsets using InterlockedMin (you should use these "Interlocked" functions more often btw)
+[numthreads(256, 1, 1)]
+void CalcCellOffsets2(uint3 id : SV_DispatchThreadID)
+{
+    uint particleIndex = particleIndicies[id.x];
+    uint cellIndex = particleCellIndicies[particleIndex];
+    
+    InterlockedMin(cellOffsets[cellIndex], id.x);
+}
+
+// Integrates over positions and velocity of particles
+[numthreads(256, 1, 1)]
+void Integrate2(uint3 id : SV_DispatchThreadID)
+{
+    float3 vel = particles[id.x].velocity + ((particles[id.x].curForce / particleMass) * timestep);
+    particles[id.x].position += vel * timestep;
+
+    float3 topRight = boxSize / 2,
+        bottomLeft = -boxSize / 2;
+    
+    // Check min bounds
+    
+    if (particles[id.x].position.x - radius < bottomLeft.x)
+    {
+        vel.x *= boundDamping;
+        particles[id.x].position.x = bottomLeft.x + radius;
+    }
+    if (particles[id.x].position.y - radius < bottomLeft.y)
+    {
+        vel.y *= boundDamping;
+        particles[id.x].position.y = bottomLeft.y + radius;
+    }
+    if (particles[id.x].position.z - radius < bottomLeft.z)
+    {
+        vel.z *= boundDamping;
+        particles[id.x].position.z = bottomLeft.z + radius;
+    }
+    
+    // Check max bounds
+    
+    if (particles[id.x].position.x + radius > topRight.x)
+    {
+        vel.x *= boundDamping;
+        particles[id.x].position.x = topRight.x - radius;
+    }
+    if (particles[id.x].position.y + radius > topRight.y)
+    {
+        vel.y *= boundDamping;
+        particles[id.x].position.y = topRight.y - radius;
+    }
+    if (particles[id.x].position.z + radius > topRight.z)
+    {
+        vel.z *= boundDamping;
+        particles[id.x].position.z = topRight.z - radius;
+    }
+    
+    //particles[id.x].curForce = max(length(particles[id.x].curForce), 10.0) * normalize(particles[id.x].curForce);
+    particles[id.x].velocity = min(length(vel), 10.0) * normalize(vel);
+}
+
+// Define different smoothing functions for particle distance
+
+float SpikyKernelFirstDeriv(float distance)
+{
+    float x = 1.0 - distance / radius;
+    return -45.f / (pi * rad4) * x * x;
+}
+
+float SpikyKernelSecondDeriv(float distance)
+{
+    float x = 1.0 - distance / radius;
+    return 90.f / (pi * rad5) * x;
+}
+
+float3 SpikyKernelGradient(float distance, float3 direction)
+{
+    return SpikyKernelFirstDeriv(distance) * direction;
+}
+
+float StdKernel(float distanceSquared)
+{
+    float x = 1.0 - distanceSquared / rad2;
+    return 315.f / (64.f * pi * rad3) * x * x * x;
+}
+
+// Computes the forces acting on particles
+[numthreads(256, 1, 1)]
+void ComputeForces2(uint3 id : SV_DispatchThreadID)
+{
+    uint particleIndex = particleIndicies[id.x];
+    int3 cellIndex = GetCell(particles[particleIndex].position);
+    
+    float3 origin = particles[particleIndex].position;
+    float density2 = particles[particleIndex].density * particles[particleIndex].density;
+    float mass2 = particleMass * particleMass;
+    float3 pressure = float3(0, 0, 0);
+    float3 visc = float3(0, 0, 0);
+    
+    // Check neighbor cells in 2 by 2 radius for adjacent particles
+    
+    for (int x = -2; x <= 2; ++x)
+    {
+        for (int y = -2; y <= 2; ++y)
+        {
+            for (int z = -2; z <= 2; ++z)
+            {
+                int3 neighborIndex = cellIndex + int3(x, y, z);
+                uint hashedNeightborIndex = HashCell(neighborIndex);
+                uint neighborIterator = cellOffsets[hashedNeightborIndex];
+                
+                // Compare all adjacent particles in their respective cells
+                
+                if (neighborIterator == 99999999)
+                    continue;
+                
+                for (uint i = neighborIterator; i < particleLength; i++)
+                {
+                    uint particleIndexB = particleIndicies[i];
+                    if (particleCellIndicies[particleIndexB] != hashedNeightborIndex)
+                        break;
+                    
+                    // Get the neighboring particle to compare
+                    
+                    Particle particleB = particles[particleIndexB];
+                    
+                    if (origin.x == particleB.position.x && origin.y == particleB.position.y && origin.z == particleB.position.z)
+                        continue;
+        
+                    float dist = distance(particleB.position, origin);
+                    if (dist < radius * 2)
+                    {
+                        float3 pressureGradientDir = normalize(particles[particleIndex].position - particleB.position);
+                        float3 pressureContribution = mass2 * SpikyKernelGradient(dist, pressureGradientDir);
+                        pressureContribution *= (particles[particleIndex].pressure / density2 +
+                            particleB.pressure / (particleB.density * particleB.density));
+
+                        float3 viscosityContribution = viscosity * mass2 * (particleB.velocity - particles[particleIndex].velocity) / particleB.density;
+                        viscosityContribution *= SpikyKernelSecondDeriv(dist);
+            
+                        pressure += pressureContribution;
+                        visc += viscosityContribution;
+                    }
+                }
+            }
+        }
+    }
+    
+    particles[particleIndex].curForce = float3(0, -9.81 * particleMass, 0) - pressure + visc;
+}
+
+// Computes the density and pressure of and on the particles
+[numthreads(256, 1, 1)]
+void ComputeDensityPressure2(uint3 id : SV_DispatchThreadID)
+{
+    uint particleIndex = particleIndicies[id.x];
+    int3 cellIndex = GetCell(particles[particleIndex].position);
+    
+    float3 origin = particles[particleIndex].position;
+    float sum = 0;
+    
+    // Check neighbor cells in 2 by 2 radius for adjacent particles
+    
+    for (int x = -2; x <= 2; ++x)
+    {
+        for (int y = -2; y <= 2; ++y)
+        {
+            for (int z = -2; z <= 2; ++z)
+            {
+                int3 neighborIndex = cellIndex + int3(x, y, z);
+                uint hashedNeightborIndex = HashCell(neighborIndex);
+                uint neighborIterator = cellOffsets[hashedNeightborIndex];
+                
+                // Compare all adjacent particles in their respective cells
+                
+                if (neighborIterator == 99999999)
+                    continue;
+                
+                for (uint i = neighborIterator; i < particleLength; i++)
+                {
+                    uint particleIndexB = particleIndicies[i];
+                    if (particleCellIndicies[particleIndexB] != hashedNeightborIndex)
+                        break;
+                    
+                    // Get the neighboring particle to compare
+                    
+                    Particle particleB = particles[particleIndexB];
+                    
+                    float3 diff = origin - particleB.position;
+                    float distSquared = dot(diff, diff);
+        
+                    if (rad2 * 0.004 > distSquared * 0.004)
+                    {
+                        sum += StdKernel(distSquared * 0.004);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Assign particle density and pressure from summed values
+    
+    particles[particleIndex].density = sum * particleMass + 0.000001;
+    particles[particleIndex].pressure = gasConstant * (particles[particleIndex].density - restDensity);
+}
