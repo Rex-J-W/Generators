@@ -11,27 +11,33 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
 {
     public BoolParameter enabled = new BoolParameter(false);
     public MinIntParameter iterations = new MinIntParameter(128, 16);
+    public MinIntParameter maxParticlesPerCell = new MinIntParameter(128, 100);
+    public MinIntParameter cellsPerSide = new MinIntParameter(128, 64);
 
-    private float testRad;
-    private Bounds fluidBounds;
-    private GraphicsBuffer particleBuffer;
+    private SPHFluid fluid;
     private Material overlayMat;
     private ComputeShader sphRenderShader;
-    private int sphRenderKernel;
+    private ComputeBuffer cellsBuffer;
+    private int sphRenderKernel, clearTexKernel, buildCellsKernel, clearCellsKernel;
 
+    /// <summary>
+    /// Checks if this volume is active
+    /// </summary>
+    /// <returns></returns>
     public bool IsActive() => enabled.value;
 
     // Do not forget to add this post process in the Custom Post Process Orders list (Project Settings > Graphics > HDRP Global Settings).
     public override CustomPostProcessInjectionPoint injectionPoint => CustomPostProcessInjectionPoint.AfterPostProcess;
 
-    const string kShaderName = "Hidden/Shader/OverlayTextureOnScreen";
+    private const string kShaderName = "Hidden/Shader/OverlayTextureOnScreen";
 
-    public void SetFluidVars(GraphicsBuffer particles, Bounds fluidBounds, float testRadius)
-    {
-        particleBuffer = particles;
-        this.fluidBounds = fluidBounds;
-        testRad = testRadius;
-    }
+    // NOTE: CANNOT HAVE ANY FUNCTIONS HERE THAT ARE NOT CALLED BY SETUP OR RENDER
+    // All functions in custom post processes are 
+
+    /// <summary>
+    /// Gets the total number of cells in the buffer
+    /// </summary>
+    private int TotalCells => cellsPerSide.value * cellsPerSide.value * cellsPerSide.value;
 
     /// <summary>
     /// Initializes this effect
@@ -40,6 +46,12 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
     {
         sphRenderShader = Resources.Load<ComputeShader>("SPHRenderShader");
         sphRenderKernel = sphRenderShader.FindKernel("Render");
+        clearTexKernel = sphRenderShader.FindKernel("ClearTexture");
+        buildCellsKernel = sphRenderShader.FindKernel("BuildCells");
+        clearCellsKernel = sphRenderShader.FindKernel("ClearCells");
+
+        fluid = (SPHFluid)FindFirstObjectByType(typeof(SPHFluid));
+        cellsBuffer = new ComputeBuffer(TotalCells * maxParticlesPerCell.value, 4);
 
         if (Shader.Find(kShaderName) != null)
             overlayMat = new Material(Shader.Find(kShaderName));
@@ -50,10 +62,9 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
 
     public override void Render(CommandBuffer cmd, HDCamera cam, RTHandle source, RTHandle destination)
     {
-        if (!enabled.value || particleBuffer == null || overlayMat == null)
+        if (!enabled.value || fluid.particleBuffer == null || overlayMat == null)
             return;
-
-        Debug.Log(fluidBounds);
+        
         // Creates a temporary render texture
 
         RenderTexture output = RenderTexture.GetTemporary(
@@ -65,7 +76,7 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
         // Setup size parameters
 
         sphRenderShader.SetVector("size", new Vector2(output.width, output.height));
-        sphRenderShader.SetInt("iterations", iterations.value);
+        sphRenderShader.SetInt("iterations", 32);
 
         // Setup camera variables
 
@@ -76,16 +87,37 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
 
         // Setup particle variables
 
+        Bounds fluidBounds = fluid.FluidBounds;
+        sphRenderShader.SetFloat("contributionAmount", 1f / 32f);
         sphRenderShader.SetVector("leftBottomAABB", fluidBounds.min);
         sphRenderShader.SetVector("rightTopAABB", fluidBounds.max);
-        sphRenderShader.SetFloat("testRad", testRad);
-        sphRenderShader.SetInt("particleCount", particleBuffer.count);
+        sphRenderShader.SetFloat("testRad", fluid.particleRad * 100f);
+        sphRenderShader.SetInt("particleCount", fluid.TotalParticles);
+
+        // Dispatches cell creation
+
+        Vector3 cellSize = fluidBounds.size / cellsPerSide.value;
+        sphRenderShader.SetVector("cellSize", cellSize);
+        sphRenderShader.SetInt("cellDimension", cellsPerSide.value);
+        sphRenderShader.SetInt("totalCells", cellsBuffer.count);
+        sphRenderShader.SetInt("maxCellParticles", maxParticlesPerCell.value);
+
+        sphRenderShader.SetBuffer(clearCellsKernel, "cells", cellsBuffer);
+        sphRenderShader.Dispatch(clearCellsKernel, cellsPerSide.value / 8, cellsPerSide.value / 8, cellsPerSide.value / 8);
+
+        sphRenderShader.SetBuffer(buildCellsKernel, "cells", cellsBuffer);
+        sphRenderShader.SetBuffer(buildCellsKernel, "particles", fluid.particleBuffer);
+        sphRenderShader.Dispatch(buildCellsKernel, fluid.TotalParticles / 256, 1, 1);
 
         // Dispatches fluid rendering
 
-        sphRenderShader.SetBuffer(sphRenderKernel, "particleBuffer", particleBuffer);
+        sphRenderShader.SetTexture(clearTexKernel, "result", output);
+        sphRenderShader.Dispatch(clearTexKernel, output.width / 8, output.height / 8, 1);
+
+        sphRenderShader.SetBuffer(sphRenderKernel, "cells", cellsBuffer);
+        sphRenderShader.SetBuffer(sphRenderKernel, "particles", fluid.particleBuffer);
         sphRenderShader.SetTexture(sphRenderKernel, "result", output);
-        sphRenderShader.Dispatch(sphRenderKernel, output.width / 8, output.height / 8, 1);
+        sphRenderShader.Dispatch(sphRenderKernel, output.width / 8, output.height / 8, 32 / 8);
 
         // Sends information to overlay shader and renders result
 
@@ -99,8 +131,12 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
         RenderTexture.ReleaseTemporary(output);
     }
 
+    /// <summary>
+    /// Memory management
+    /// </summary>
     public override void Cleanup()
     {
+        cellsBuffer.Release();
         CoreUtils.Destroy(overlayMat);
     }
 }

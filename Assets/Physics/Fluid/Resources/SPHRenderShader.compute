@@ -1,3 +1,6 @@
+#pragma kernel ClearTexture
+#pragma kernel ClearCells
+#pragma kernel BuildCells
 #pragma kernel Render
 
 // Particle data
@@ -22,7 +25,7 @@ inline float3 getCamRayDir(float2 coord)
 
 // Calculates ray-AABB intersection
 // Adapted from : https://gamedev.stackexchange.com/questions/18436/most-efficient-aabb-vs-ray-collision-algorithms
-float2 rayIntersectAABB(float3 lb, float3 rt, float3 org, float3 dir)
+inline float2 rayIntersectAABB(float3 lb, float3 rt, float3 org, float3 dir)
 {
     // dir is unit direction vector of ray
     float3 dirfrac = float3(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
@@ -50,41 +53,133 @@ float2 rayIntersectAABB(float3 lb, float3 rt, float3 org, float3 dir)
     return float2(tmin, tmax);
 }
 
+float2 intersectAABB(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax)
+{
+    float3 tMin = (boxMin - rayOrigin) / rayDir;
+    float3 tMax = (boxMax - rayOrigin) / rayDir;
+    float3 t1 = min(tMin, tMax);
+    float3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+    return float2(tNear, tFar);
+};
+
 // Data variables
 
+float contributionAmount;
 float3 leftBottomAABB;
 float3 rightTopAABB;
 uint particleCount;
 float testRad;
-StructuredBuffer<Particle> particleBuffer;
+
+StructuredBuffer<Particle> particles;
 RWTexture2D<float4> result;
 
-// Raymarches the fluid volume
+// Cell variables
+
+float3 cellSize;
+int cellDimension;
+uint totalCells;
+uint maxCellParticles;
+
+RWStructuredBuffer<int> cells; // Cell data length(cells) = length(particleCell) * maxCellParticles
+
+// Gets the cell loction of an arbitrary position "pos"
+// Returns int3(-1, -1, -1) if position is outside the fluid AABB
+int3 withinCell(float3 pos)
+{
+    if (pos.x < leftBottomAABB.x || pos.y < leftBottomAABB.y || pos.z < leftBottomAABB.z ||
+        pos.x > rightTopAABB.x || pos.y > rightTopAABB.y || pos.z > rightTopAABB.z)
+        return int3(-1, -1, -1);
+    
+    float3 scaledPos = pos - leftBottomAABB;
+    int3 cellPos = int3(clamp(pos.x, leftBottomAABB.x, rightTopAABB.x) / cellSize.x, 
+        clamp(pos.y, leftBottomAABB.y, rightTopAABB.y) / cellSize.y, 
+        clamp(pos.z, leftBottomAABB.z, rightTopAABB.z) / cellSize.z);
+    return cellPos;
+}
+
+// Gets the index of the cell in the cell buffer from the cell location
+int getCellBufferIndex(int3 cellLocation)
+{
+    return maxCellParticles * (cellLocation.x + cellLocation.y * cellDimension + cellLocation.z * cellDimension * cellDimension);
+}
+
+// Clears all the cells before building them
+[numthreads(8, 8, 8)]
+void ClearCells(uint3 id : SV_DispatchThreadID)
+{
+    int index = id.x + id.y * cellDimension + id.z * cellDimension * cellDimension;
+    cells[index] = -1;
+}
+
+// Builds the cells
+[numthreads(256, 1, 1)]
+void BuildCells(uint3 id : SV_DispatchThreadID)
+{
+    int3 cellL = withinCell(particles[id.x].position);
+    if (cellL.x != -1)
+    {
+        int cellIndex = getCellBufferIndex(cellL);
+        for (uint i = 0; i < maxCellParticles; i++)
+        {
+            if (cells[cellIndex + i] == -1)
+            {
+                cells[cellIndex + i] = (int) id.x;
+                break;
+            }
+        }
+    }
+}
+
+// Sets the result to transparent
 [numthreads(8, 8, 1)]
+void ClearTexture(uint3 id : SV_DispatchThreadID)
+{
+    result[id.xy] = float4(0, 0, 0, 0);
+}
+
+// Raymarches the fluid volume
+[numthreads(8, 8, 8)]
 void Render(uint3 id : SV_DispatchThreadID)
 {
+    // Gets the current ray
     float2 percentOnTex = id.xy / size;
     float3 curRayOrigin = mul(camToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz,
-			curRayDir = getCamRayDir(percentOnTex * 2 - 1);
+        curRayDir = getCamRayDir(percentOnTex * 2 - 1);
     
+    // Checks if ray intersects fluid bounds
     float2 aabbTest = rayIntersectAABB(leftBottomAABB, rightTopAABB, curRayOrigin, curRayDir);
-    if (aabbTest.x != -1)
+    if (aabbTest.x > aabbTest.y)
+        return;
+    
+    // Gets the current ray evaluation point
+    float distOnRay = lerp(id.z / (float) iterations, aabbTest.x, aabbTest.y);
+    float3 curRayPt = curRayOrigin + (distOnRay * curRayDir);
+    result[id.xy] = float4((aabbTest.y - aabbTest.x) / 10.0f, 0, 0, (aabbTest.y - aabbTest.x) / 10.0f);
+    
+    // Gets the 3D cell location
+    int3 cellL = withinCell(curRayPt);
+    if (cellL.x == -1)
+        return;
+    
+    // Gets the cell index from cell 3D location
+        int cellIndex = getCellBufferIndex(cellL);
+    float cellAvgSize = sqrt(pow(cellSize.x, 2) + pow(cellSize.y, 2) + pow(cellSize.z, 2)) * 2;
+    
+    // Accumulates particle values in cell
+    for (uint i = 0; i < maxCellParticles; i++)
     {
-        //float distOnRay = clamp(atmoLength / iterations, 0, maxStepLength) * id.z;
-        //float3 curRayPt = curRayOrigin + distOnRay * curRayDir;
-        
-        /*for (int i = 0; i < particleCount; i++)
+        if (cells[cellIndex + i] == -1)
+            break;
+        //result[id.xy] = float4((float) i / (float) maxCellParticles, 0, 0, (float) i / (float) maxCellParticles);
+        //result[id.xy] = float4(1, 0, 0, 1);
+        //break;
+        //result[id.xy] += float4(contributionAmount, contributionAmount, contributionAmount, contributionAmount);
+        if (distance(particles[cells[cellIndex + i]].position, curRayPt) < cellAvgSize)
         {
-            if (distance(particleBuffer[i].position, curRayPt) < testRad)
-            {
-            
-            }
-        }*/
-        
-        result[id.xy] = float4(id.x & id.y, (id.x & 15) / 15.0, (id.y & 15) / 15.0, 1.0);
-    }
-    else
-    {
-        result[id.xy] = float4(0, 0, 0, 0);
+            result[id.xy] = float4(1, 0, 0, 1);
+            break;
+        }
     }
 }

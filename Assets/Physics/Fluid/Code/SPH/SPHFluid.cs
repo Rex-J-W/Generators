@@ -4,14 +4,29 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using UnityEngine;
-using UnityEngine.Rendering;
 using UnityEngine.VFX;
 using Random = UnityEngine.Random;
 
 public class SPHFluid : MonoBehaviour
 {
+    // Create render params
+
+    public enum RenderStyle
+    {
+        Particles, PostProcess
+    }
+
+    // Rendering variables
+
+    [Space(10)]
+    [Header("Rendering")]
+    public RenderStyle rendering = RenderStyle.Particles;
+
     // Create particle data structure
 
+    /// <summary>
+    /// Represents a particle
+    /// </summary>
     [Serializable]
     [StructLayout(LayoutKind.Sequential, Size = 44)]
     [VFXType(VFXTypeAttribute.Usage.GraphicsBuffer)]
@@ -21,7 +36,7 @@ public class SPHFluid : MonoBehaviour
         public Vector3 curForce, velocity, position;
     }
 
-    // Variables
+    // Fluid setup variables
 
     [Space(10)]
     [Header("Fluid Setup")]
@@ -42,16 +57,16 @@ public class SPHFluid : MonoBehaviour
     [Range(0.0001f, 10f)] public float restingDensity = 1f;
     [Range(0f, 1f)] public float timestep = 0.007f;
 
-    // Rendering variables
+    // Interaction variables
 
     [Space(10)]
-    [Header("Optional Interact Obj")]
+    [Header("Interaction")]
     public Transform interactableSphere;
 
     // Hidden variables in inspector
 
     private VisualEffect visualize;
-    //private SPHRenderer rend;
+    private SPHRenderer rend;
     private ComputeShader shader;
     private Particle[] particles;
 
@@ -62,7 +77,7 @@ public class SPHFluid : MonoBehaviour
     /// <summary>
     /// The total particles simultated
     /// </summary>
-    private int TotalParticles => spawnSize * spawnSize * spawnSize;
+    public int TotalParticles => spawnSize * spawnSize * spawnSize;
 
     /// <summary>
     /// Returns the fluid boundary volume
@@ -77,33 +92,22 @@ public class SPHFluid : MonoBehaviour
         // Load shader
 
         shader = Resources.Load<ComputeShader>("SPHFluidCompute");
-        
+
         integrateKernel = shader.FindKernel("Integrate");
         computeForcesKernel = shader.FindKernel("ComputeForces");
         densityPressureKernel = shader.FindKernel("ComputeDensityPressure");
         findNeighborsKernel = shader.FindKernel("FindNeighbors");
 
-        // Create VFX visualization
+        // Select rendering method
 
-        VisualEffectAsset vfxAsset = Resources.Load<VisualEffectAsset>("VisualizeWater");
-        GameObject vfx = new GameObject("_SPHViewer");
-        vfx.transform.SetParent(transform);
-        vfx.AddComponent<VisualEffect>().visualEffectAsset = vfxAsset;
-        visualize = vfx.GetComponent<VisualEffect>();
-
-        // Initialize raymarching shader
-
-        //GameObject renderObj = new GameObject("_SPHVolume");
-        //renderObj.transform.SetParent(transform);
-        //Volume rendVol = renderObj.AddComponent<Volume>();
-        
-        //VolumeProfile profile = Resources.Load<VolumeProfile>("SPHRenderVolume");
-        //rendVol.sharedProfile = profile;
-        //rendVol.isGlobal = true;
-        //rendVol.priority = 100;
-        //rendVol.profile.TryGet(out rend);
-        //rend.active = true;
-        //rend.enabled.value = true;
+        if (rendering == RenderStyle.Particles)
+            visualize = Simulation.CreateVFXForSim(transform, "VisualizeWater");
+        else
+        {
+            rend = Simulation.CreatePostProcessVolumeForSim<SPHRenderer>(gameObject, "SPHRenderVolume");
+            rend.active = true;
+            rend.enabled.value = true;
+        }
 
         // Spawn particles
 
@@ -135,11 +139,12 @@ public class SPHFluid : MonoBehaviour
     /// </summary>
     private void Update()
     {
-        //Debug.Log(rend.IsActive());
-        //rend.SetFluidVars(particleBuffer, FluidBounds, particleRad * 20f);
-        visualize.SetGraphicsBuffer("ParticleBuffer", particleBuffer);
-        visualize.SetInt("ParticleCount", TotalParticles);
-        visualize.SetFloat("FrameTime", Time.deltaTime);
+        if (rendering == RenderStyle.Particles)
+        {
+            visualize.SetGraphicsBuffer("ParticleBuffer", particleBuffer);
+            visualize.SetInt("ParticleCount", TotalParticles);
+            visualize.SetFloat("FrameTime", Time.deltaTime);
+        }
     }
 
     /// <summary>
@@ -167,6 +172,14 @@ public class SPHFluid : MonoBehaviour
         shader.SetVector("boxCenter", transform.position);
         shader.SetVector("boxSize", transform.localScale);
         shader.SetFloat("timestep", timestep);
+
+        // Precalculate some variables
+
+        shader.SetFloat("mass2", particleMass * particleMass);
+        shader.SetFloat("viscosityMass2", viscosity * particleMass * particleMass);
+        shader.SetVector("gravity", new Vector3(0f, -9.81f * particleMass, 0f));
+
+        // Dispatch fluid simulation
 
         shader.Dispatch(findNeighborsKernel, spawnSize / 8, spawnSize / 8, spawnSize / 8);
         shader.Dispatch(densityPressureKernel, spawnSize / 8, spawnSize / 8, spawnSize / 8);
@@ -220,10 +233,11 @@ public class SPHFluid : MonoBehaviour
         shader.SetFloat("pi", Mathf.PI);
 
         shader.SetFloat("radius", particleRad);
+        shader.SetFloat("doubleRad", particleRad * 2);
         shader.SetFloat("rad2", particleRad * particleRad);
-        shader.SetFloat("rad3", particleRad * particleRad * particleRad);
-        shader.SetFloat("rad4", particleRad * particleRad * particleRad * particleRad);
-        shader.SetFloat("rad5", particleRad * particleRad * particleRad * particleRad * particleRad);
+        shader.SetFloat("piRad3_64_315", 315f / (Mathf.PI * 64f * particleRad * particleRad * particleRad));
+        shader.SetFloat("piRad4_neg45", -45f / (Mathf.PI * particleRad * particleRad * particleRad * particleRad));
+        shader.SetFloat("piRad5_90", 90f / (Mathf.PI * particleRad * particleRad * particleRad * particleRad * particleRad));
 
         shader.SetBuffer(integrateKernel, "particles", particleBuffer);
 
