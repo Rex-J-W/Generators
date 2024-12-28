@@ -2665,7 +2665,7 @@ MonoBehaviour:
       m_Type:
         m_SerializableType: System.Single, mscorlib, Version=4.0.0.0, Culture=neutral,
           PublicKeyToken=b77a5c561934e089
-      m_SerializableObject: 30000
+      m_SerializableObject: 80000
     m_Space: -1
   m_Property:
     name: y
@@ -2834,7 +2834,7 @@ MonoBehaviour:
       m_Type:
         m_SerializableType: System.Single, mscorlib, Version=4.0.0.0, Culture=neutral,
           PublicKeyToken=b77a5c561934e089
-      m_SerializableObject: 30000
+      m_SerializableObject: 80000
     m_Space: -1
   m_Property:
     name: y
@@ -3488,7 +3488,7 @@ MonoBehaviour:
       m_Type:
         m_SerializableType: UnityEngine.Vector3, UnityEngine.CoreModule, Version=0.0.0.0,
           Culture=neutral, PublicKeyToken=null
-      m_SerializableObject: '{"x":0.0985226035118103,"y":0.1464540809392929,"z":0.5094339847564697}'
+      m_SerializableObject: '{"x":0.0985226035118103,"y":0.1464540809392929,"z":0.0}'
     m_Space: -1
   m_Property:
     name: _Color

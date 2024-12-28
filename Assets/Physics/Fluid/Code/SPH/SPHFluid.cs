@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.VFX;
 using Random = UnityEngine.Random;
 
@@ -47,9 +48,10 @@ public class SPHFluid : MonoBehaviour
     [Header("Optional Interact Obj")]
     public Transform interactableSphere;
 
-    // Hidden variables
+    // Hidden variables in inspector
 
     private VisualEffect visualize;
+    //private SPHRenderer rend;
     private ComputeShader shader;
     private Particle[] particles;
 
@@ -61,6 +63,11 @@ public class SPHFluid : MonoBehaviour
     /// The total particles simultated
     /// </summary>
     private int TotalParticles => spawnSize * spawnSize * spawnSize;
+
+    /// <summary>
+    /// Returns the fluid boundary volume
+    /// </summary>
+    public Bounds FluidBounds => new Bounds(transform.position, transform.localScale);
 
     /// <summary>
     /// Run on game start
@@ -83,6 +90,20 @@ public class SPHFluid : MonoBehaviour
         vfx.transform.SetParent(transform);
         vfx.AddComponent<VisualEffect>().visualEffectAsset = vfxAsset;
         visualize = vfx.GetComponent<VisualEffect>();
+
+        // Initialize raymarching shader
+
+        //GameObject renderObj = new GameObject("_SPHVolume");
+        //renderObj.transform.SetParent(transform);
+        //Volume rendVol = renderObj.AddComponent<Volume>();
+        
+        //VolumeProfile profile = Resources.Load<VolumeProfile>("SPHRenderVolume");
+        //rendVol.sharedProfile = profile;
+        //rendVol.isGlobal = true;
+        //rendVol.priority = 100;
+        //rendVol.profile.TryGet(out rend);
+        //rend.active = true;
+        //rend.enabled.value = true;
 
         // Spawn particles
 
@@ -114,6 +135,8 @@ public class SPHFluid : MonoBehaviour
     /// </summary>
     private void Update()
     {
+        //Debug.Log(rend.IsActive());
+        //rend.SetFluidVars(particleBuffer, FluidBounds, particleRad * 20f);
         visualize.SetGraphicsBuffer("ParticleBuffer", particleBuffer);
         visualize.SetInt("ParticleCount", TotalParticles);
         visualize.SetFloat("FrameTime", Time.deltaTime);
