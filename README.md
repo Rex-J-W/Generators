@@ -1,2 +1,5 @@
 # Generators
- Generation code for all sorts of procedural systems.
+ Currently included procedural systems:
+
+ - Procedural house generation
+ - SPH fluid simulation
