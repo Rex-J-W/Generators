@@ -1,0 +1,135 @@
+// Referenced: https://www.youtube.com/watch?v=BNZtUB7yhX4
+#pragma kernel RenderRaymarch
+#include "UnityCG.cginc"
+
+struct RaymarchedObj
+{
+    int type;
+    float3 position;
+    float param0;
+    float param1;
+    float param2;
+    float param3;
+    float param4;
+    float param5;
+    float param6;
+    float param7;
+    float param8;
+    float param9;
+};
+
+// Camera vars
+
+float2 size;
+float4x4 camToWorld, camInverseProjection;
+float camFarPlane, camNearPlane;
+Texture2DArray<float> _CameraDepthTexture; // HDRP Depth Texture Array
+StructuredBuffer<int2> _DepthPyramidMipLevelOffsets;
+
+// Camera functions
+
+// Gets the view ray direction from a screen coordinate
+inline float3 getCamRayDir(float2 coord)
+{
+    return normalize(mul(camToWorld, float4(mul(camInverseProjection, float4(coord, 0.0f, 1.0f)).xyz, 0.0f)).xyz);
+}
+
+float getCamDepth(int2 coord)
+{
+    int2 mipCoord = coord.xy >> int(0);
+    int2 mipOffset = _DepthPyramidMipLevelOffsets[int(0)];
+    return Linear01Depth(_CameraDepthTexture.Load(int4(mipOffset + mipCoord, 0, 0)));
+}
+
+// SDFs
+
+float sdfSphere(float3 pt, float rad)
+{
+    return length(pt) - rad;
+}
+
+float sdfRoundBox(float3 pt, float3 box, float r)
+{
+    float3 q = abs(pt) - box + r;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+// Raymarching vars
+
+int maxIterations;
+int objectCount;
+float3 sunDir;
+float ambientLight;
+
+// Buffers
+
+StructuredBuffer<RaymarchedObj> objects;
+RWTexture2D<float4> result;
+
+// Raymarching fucntions
+
+float sampleSceneSDF(float3 pt)
+{
+    float sdfMin = 2000000000;
+    for (int i = 0; i < objectCount; i++)
+    {
+        if (objects[i].type == 0)
+        {
+            sdfMin = min(sdfMin, sdfSphere(pt - objects[i].position, objects[i].param0));
+        }
+        else if (objects[i].type == 1)
+        {
+            sdfMin = min(sdfMin, sdfRoundBox(pt + float3(0, 2, 0), float3(2, 1, 2), 0.1f));
+        }
+    }
+    return sdfMin;
+}
+
+float3 calcNormal(float3 pt)
+{
+    const float EPS = 0.0001f;
+    const float2 h = float2(EPS, 0);
+    return normalize(float3(sampleSceneSDF(pt + h.xyy) - sampleSceneSDF(pt - h.xyy),
+                           sampleSceneSDF(pt + h.yxy) - sampleSceneSDF(pt - h.yxy),
+                           sampleSceneSDF(pt + h.yyx) - sampleSceneSDF(pt - h.yyx)));
+}
+
+float normalLighting(float3 normal)
+{
+    return clamp(dot(sunDir, normal), 0, 1);
+}
+
+// Raymarches the scene
+[numthreads(8, 8, 1)]
+void RenderRaymarch(uint3 id : SV_DispatchThreadID)
+{
+    // Get ray
+    
+    float2 percentOnTex = id.xy / size;
+    float3 curRayOrigin = mul(camToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz,
+        curRayDir = getCamRayDir(percentOnTex * 2 - 1);
+    
+    // Perform raymarching
+    
+    float depth = getCamDepth(id.xy);
+    float distOnRay = 0;
+    
+    for (int i = 0; i < maxIterations; i++)
+    {
+        float3 curRayPt = curRayOrigin + (distOnRay * curRayDir);
+        
+        float sdfValue = sampleSceneSDF(curRayPt);
+        if (sdfValue - 0.00001f < 0)
+        {
+            float3 normal = calcNormal(curRayPt);
+            float lightAmt = normalLighting(normal) + ambientLight;
+            
+            result[id.xy] = float4(float3(1, 0, 0) * lightAmt, 1);
+            break;
+        }
+        
+        if (distOnRay / camFarPlane > depth)
+            break;
+        distOnRay += sdfValue;
+    }
+}

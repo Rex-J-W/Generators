@@ -893,6 +893,12 @@ MonoBehaviour:
   iterations:
     m_OverrideState: 1
     m_Value: 128
+  maxParticlesPerCell:
+    m_OverrideState: 1
+    m_Value: 128
+  cellsPerSide:
+    m_OverrideState: 1
+    m_Value: 128
 --- !u!114 &-1016694868962581565
 MonoBehaviour:
   m_ObjectHideFlags: 3
@@ -1066,6 +1072,7 @@ MonoBehaviour:
   - {fileID: -8959065380368416555}
   - {fileID: 3884010097042312913}
   - {fileID: -1116994563734088631}
+  - {fileID: 3228974875579044041}
 --- !u!114 &448115243408767295
 MonoBehaviour:
   m_ObjectHideFlags: 3
@@ -1628,6 +1635,25 @@ MonoBehaviour:
   ambientProbeDimmer:
     m_OverrideState: 1
     m_Value: 0.5
+--- !u!114 &3228974875579044041
+MonoBehaviour:
+  m_ObjectHideFlags: 3
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ea54a5991d1b0cd4eb46f8c9f9ada94d, type: 3}
+  m_Name: RenderRaymarchedObjects
+  m_EditorClassIdentifier: 
+  active: 1
+  enabled:
+    m_OverrideState: 1
+    m_Value: 0
+  maxIterations:
+    m_OverrideState: 1
+    m_Value: 128
 --- !u!114 &3884010097042312913
 MonoBehaviour:
   m_ObjectHideFlags: 3

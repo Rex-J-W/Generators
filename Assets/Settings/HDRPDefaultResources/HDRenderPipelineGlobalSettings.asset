@@ -296,6 +296,8 @@ MonoBehaviour:
         m_AfterPostProcessCustomPostProcesses:
           m_InjectionPoint: 2
           m_CustomPostProcessTypesAsString:
+          - RenderRaymarchedObjects, Assembly-CSharp, Version=0.0.0.0, Culture=neutral,
+            PublicKeyToken=null
           - SPHRenderer, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
     - rid: 3062848061014278150
       type: {class: RenderGraphSettings, ns: UnityEngine.Rendering.HighDefinition, asm: Unity.RenderPipelines.HighDefinition.Runtime}

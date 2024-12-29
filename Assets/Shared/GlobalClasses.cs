@@ -91,3 +91,24 @@ public static class Simulation
         return postProcessEffect;
     }
 }
+
+/// <summary>
+/// General HDRP rendering additions
+/// </summary>
+public static class Rendering
+{
+    /// <summary>
+    /// Gets a temporary render texture from a source handle with enableRandomWrite enabled
+    /// </summary>
+    /// <param name="source">The handle to use to generate this texture</param>
+    /// <returns>Temporary render texture with enableRandomWrite = true</returns>
+    public static RenderTexture GetTempComputeTexture(RTHandle source)
+    {
+        RenderTexture output = RenderTexture.GetTemporary(
+            source.rt.width - (source.rt.width % 8), source.rt.height - (source.rt.height % 8),
+            0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+        output.enableRandomWrite = true;
+        output.Create();
+        return output;
+    }
+}

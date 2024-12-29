@@ -64,14 +64,10 @@ public sealed class SPHRenderer : CustomPostProcessVolumeComponent, IPostProcess
     {
         if (!enabled.value || fluid.particleBuffer == null || overlayMat == null)
             return;
-        
+
         // Creates a temporary render texture
 
-        RenderTexture output = RenderTexture.GetTemporary(
-            source.rt.width - (source.rt.width % 8), source.rt.height - (source.rt.height % 8),
-            0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
-        output.enableRandomWrite = true;
-        output.Create();
+        RenderTexture output = Rendering.GetTempComputeTexture(source);
 
         // Setup size parameters
 

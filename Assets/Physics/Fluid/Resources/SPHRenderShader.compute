@@ -150,21 +150,22 @@ void Render(uint3 id : SV_DispatchThreadID)
     
     // Checks if ray intersects fluid bounds
     float2 aabbTest = rayIntersectAABB(leftBottomAABB, rightTopAABB, curRayOrigin, curRayDir);
-    if (aabbTest.x > aabbTest.y)
+    if (aabbTest.x == -1)
         return;
     
     // Gets the current ray evaluation point
     float distOnRay = lerp(id.z / (float) iterations, aabbTest.x, aabbTest.y);
     float3 curRayPt = curRayOrigin + (distOnRay * curRayDir);
-    result[id.xy] = float4((aabbTest.y - aabbTest.x) / 10.0f, 0, 0, (aabbTest.y - aabbTest.x) / 10.0f);
+    result[id.xy] = float4(distOnRay - aabbTest.x, 0, 0, 1);
     
     // Gets the 3D cell location
     int3 cellL = withinCell(curRayPt);
     if (cellL.x == -1)
         return;
+    //result[id.xy] = float4((aabbTest.y - aabbTest.x) / 10.0f, 0, 0, (aabbTest.y - aabbTest.x) / 10.0f);
     
     // Gets the cell index from cell 3D location
-        int cellIndex = getCellBufferIndex(cellL);
+    int cellIndex = getCellBufferIndex(cellL);
     float cellAvgSize = sqrt(pow(cellSize.x, 2) + pow(cellSize.y, 2) + pow(cellSize.z, 2)) * 2;
     
     // Accumulates particle values in cell
