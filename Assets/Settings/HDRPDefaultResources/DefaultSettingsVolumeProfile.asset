@@ -1654,6 +1654,9 @@ MonoBehaviour:
   maxIterations:
     m_OverrideState: 1
     m_Value: 128
+  ambientLight:
+    m_OverrideState: 1
+    m_Value: 0.1
 --- !u!114 &3884010097042312913
 MonoBehaviour:
   m_ObjectHideFlags: 3

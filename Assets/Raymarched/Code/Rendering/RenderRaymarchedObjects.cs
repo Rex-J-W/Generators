@@ -9,7 +9,11 @@ using System;
 public struct RaymarchedObj
 {
     public int type;
+    public int solidType;
+    public int repeating;
     public Vector3 position;
+    public Vector3 repeatSize;
+    public Vector3 color;
     public float param0;
     public float param1;
     public float param2;
@@ -30,8 +34,11 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 {
     [Tooltip("Whether raymarched objects are enabled or not")]
     public BoolParameter enabled = new BoolParameter(false);
+    public ClampedFloatParameter resolution = new ClampedFloatParameter(1e-05f, 0.0000001f, 0.0001f);
     public MinIntParameter maxIterations = new MinIntParameter(128, 8);
     public FloatParameter ambientLight = new FloatParameter(0.1f);
+    [Space(7f)]
+    public BoolParameter debugRayCount = new BoolParameter(false);
 
     private Material overlayMat;
     private ComputeShader raymarchShader;
@@ -40,6 +47,7 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 
     private RaymarchedGameObject[] raymarchedObjs;
     private ComputeBuffer objectsBuffer;
+    private int prevBufferLength;
 
     public bool IsActive() => enabled.value;
 
@@ -57,6 +65,7 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 
         raymarchShader = Resources.Load<ComputeShader>("RaymarchObjects");
         raymarchKernel = raymarchShader.FindKernel("RenderRaymarch");
+        prevBufferLength = 0;
 
         // Find sun light
 
@@ -88,6 +97,10 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 
         RenderTexture output = Rendering.GetTempComputeTexture(source);
 
+        // Set debug vars
+
+        raymarchShader.SetInt("debugRayCount", debugRayCount.value ? 1 : 0);
+
         // Set camera vars
 
         Camera cam = camera.camera;
@@ -96,35 +109,37 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
         raymarchShader.SetFloat("camFarPlane", cam.farClipPlane);
         raymarchShader.SetFloat("camNearPlane", cam.nearClipPlane);
         raymarchShader.SetVector("size", new Vector2(output.width, output.height));
+        raymarchShader.SetVector("cameraPos", cam.transform.position);
 
         // Find raymarched objects
 
         raymarchedObjs = FindObjectsByType<RaymarchedGameObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.InstanceID);
-        if (raymarchedObjs.Length > 0)
-        {
-            objectsBuffer = new ComputeBuffer(raymarchedObjs.Length, 56);
+        //if (raymarchedObjs.Length > 0 && prevBufferLength != raymarchedObjs.Length)
+        //{
+            objectsBuffer?.Release();
+            objectsBuffer = new ComputeBuffer(raymarchedObjs.Length, 88);
+            prevBufferLength = raymarchedObjs.Length;
+        //}
 
-            // Setup raymarching objects
+        // Setup raymarching objects
 
-            RaymarchedObj[] raymarchObjData = new RaymarchedObj[raymarchedObjs.Length];
-            for (int i = 0; i < raymarchedObjs.Length; i++)
-                raymarchObjData[i] = raymarchedObjs[i].GetObjectData();
-            objectsBuffer.SetData(raymarchObjData);
+        RaymarchedObj[] raymarchObjData = new RaymarchedObj[raymarchedObjs.Length];
+        for (int i = 0; i < raymarchedObjs.Length; i++)
+            raymarchObjData[i] = raymarchedObjs[i].GetObjectData();
+        objectsBuffer.SetData(raymarchObjData);
 
-            raymarchShader.SetInt("objectCount", raymarchedObjs.Length);
-            raymarchShader.SetBuffer(raymarchKernel, "objects", objectsBuffer);
+        raymarchShader.SetInt("objectCount", raymarchedObjs.Length);
+        raymarchShader.SetBuffer(raymarchKernel, "objects", objectsBuffer);
 
-            // Dispatch raymarching
+        // Dispatch raymarching
 
-            raymarchShader.SetVector("sunDir", -sun.forward);
-            raymarchShader.SetFloat("ambientLight", ambientLight.value);
-            raymarchShader.SetInt("maxIterations", maxIterations.value);
-            raymarchShader.SetTexture(raymarchKernel, "result", output);
-            raymarchShader.SetTextureFromGlobal(raymarchKernel, "DepthTexture", "_CameraDepthTexture");
-            raymarchShader.Dispatch(raymarchKernel, output.width / 8, output.height / 8, 1);
-
-            objectsBuffer.Release();
-        }
+        raymarchShader.SetVector("sunDir", -sun.forward);
+        raymarchShader.SetFloat("ambientLight", ambientLight.value);
+        raymarchShader.SetFloat("resolution", resolution.value);
+        raymarchShader.SetInt("maxIterations", maxIterations.value);
+        raymarchShader.SetTexture(raymarchKernel, "result", output);
+        raymarchShader.SetTextureFromGlobal(raymarchKernel, "DepthTexture", "_CameraDepthTexture");
+        raymarchShader.Dispatch(raymarchKernel, output.width / 8, output.height / 8, 1);
 
         // Overlay raymarched texture onto scene
 
@@ -143,6 +158,7 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
     /// </summary>
     public override void Cleanup()
     {
+        objectsBuffer?.Release();
         CoreUtils.Destroy(overlayMat);
     }
 }
