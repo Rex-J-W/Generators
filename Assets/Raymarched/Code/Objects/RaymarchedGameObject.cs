@@ -22,17 +22,12 @@ public abstract class RaymarchedGameObject : MonoBehaviour
     /// <summary>
     /// The type of solid this is;
     /// </summary>
-    public SolidType solidType; 
-
-    /// <summary>
-    /// Does this object repeat infinitely;
-    /// </summary>
-    public bool repeating;
+    public SolidType solidType;
 
     /// <summary>
     /// How frequently the object repeats
     /// </summary>
-    public Vector3 repetitionSize = Vector3.one * 5f;
+    public Vector3 repetitionSize = Vector3.zero;
 
     /// <summary>
     /// Gets the data for raymarching this object

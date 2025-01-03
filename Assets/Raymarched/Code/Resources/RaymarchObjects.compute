@@ -6,8 +6,9 @@ struct RaymarchedObj
 {
     int type;
     int solidType;
-    int repeating;
     float3 position;
+    float4 rotation;
+    float3 scale;
     float3 repeatSize;
     float3 color;
     float param0;
@@ -15,11 +16,6 @@ struct RaymarchedObj
     float param2;
     float param3;
     float param4;
-    float param5;
-    float param6;
-    float param7;
-    float param8;
-    float param9;
 };
 
 // Camera vars
@@ -47,6 +43,7 @@ float getCamDepth(int2 coord)
 }
 
 // SDFs
+// Reference: https://iquilezles.org/articles/distfunctions/
 
 float sdfSphere(float3 pt, float rad)
 {
@@ -57,6 +54,18 @@ float sdfBox(float3 pt, float3 box)
 {
     float3 q = abs(pt) - box;
     return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+float sdfRoundBox(float3 p, float3 b, float r)
+{
+    float3 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+float sdfTorus(float3 p, float2 t)
+{
+    float2 q = float2(length(p.xz) - t.x, p.y);
+    return length(q) - t.y;
 }
 
 float sdfMandlebulb(float3 pt, int steps)
@@ -114,9 +123,12 @@ float sdfMandlebulb(float3 pt, int steps)
 // Raymarching vars
 
 int maxIterations;
+int maxLightIterations;
 int objectCount;
 float3 sunDir;
 float ambientLight;
+float shadowRayMaxLength;
+float penumbraSize;
 float resolution;
 
 // Buffers
@@ -126,71 +138,81 @@ RWTexture2D<float4> result;
 
 // Raymarching fucntions
 
-float mod(float x, float y)
+inline float mod(float x, float y)
 {
     return x - y * floor(x / y);
 }
 
+// Quaternion ref: https://gist.github.com/mattatz/40a91588d5fb38240403f198a938a593
+// Quaternion multiplication
+float4 qmul(float4 q1, float4 q2)
+{
+    return float4(
+        q2.xyz * q1.w + q1.xyz * q2.w + cross(q1.xyz, q2.xyz),
+        q1.w * q2.w - dot(q1.xyz, q2.xyz)
+    );
+}
+
+// Quaternion rotation
+float3 rotate_vector(float3 v, float4 r)
+{
+    float4 r_c = r * float4(-1, -1, -1, 1);
+    return qmul(r, qmul(float4(v, 0), r_c)).xyz;
+}
+
 // Get scene color and min value
-float4 sampleSceneSDF(float3 pt)
+float2 sampleSceneSDF(float3 pt)
 {
     float sdfVal = 2000000000;
-    float3 color = objects[0].color;
-    float3 objPos;
+    int objIndex = 0;
+    
+    // March through every object in the scene
+    // Objects are sorted such that removal follows addition
     
     for (int i = 0; i < objectCount; i++)
     {
+        // Get object position
+        
+        float newSDFVal = 2000000000;
+        float3 objPos = pt - objects[i].position;
+        
+        // Infinite repetition check
+        
+        float3 objRepeat = objects[i].repeatSize / 2;
+        objPos = float3(objRepeat.x > 0 ? mod(objPos.x + objRepeat.x, objRepeat.x * 2) - objRepeat.x : objPos.x,
+                        objRepeat.y > 0 ? mod(objPos.y + objRepeat.y, objRepeat.y * 2) - objRepeat.y : objPos.y,
+                        objRepeat.z > 0 ? mod(objPos.z + objRepeat.z, objRepeat.z * 2) - objRepeat.z : objPos.z);
+        
+        objPos = rotate_vector(objPos, objects[i].rotation);
+        objPos *= objects[i].scale;
+        
+        // Check object type
+        
+        int type = objects[i].type;
+        if (type == 0)
+            newSDFVal = sdfSphere(objPos, objects[i].param0);
+        else if (type == 1)
+            newSDFVal = sdfBox(objPos, float3(objects[i].param0, objects[i].param1, objects[i].param2));
+        else if (type == 2)
+            newSDFVal = sdfRoundBox(objPos, float3(objects[i].param0, objects[i].param1, objects[i].param2), objects[i].param3);
+        else if (type == 3)
+            newSDFVal = sdfTorus(objPos, float2(objects[i].param0, objects[i].param1));
+        
+        // Check add / remove pass
+        
         if (objects[i].solidType == 0)
         {
-            float newSDFVal = 2000000000;
-            float3 objPos = pt;
-        
-            if (objects[i].repeating)
-            {
-                float3 objRepeat = objects[i].repeatSize / 2;
-                objPos = float3(mod(objPos.x + objRepeat.x, objRepeat.x * 2) - objRepeat.x,
-                            mod(objPos.y + objRepeat.y, objRepeat.y * 2) - objRepeat.y,
-                            mod(objPos.z + objRepeat.z, objRepeat.z * 2) - objRepeat.z);
-            }
-        
-            if (objects[i].type == 0)
-                newSDFVal = sdfSphere(objPos - objects[i].position, objects[i].param0);
-            else
-                newSDFVal = sdfBox(objPos - objects[i].position, float3(objects[i].param0, objects[i].param1, objects[i].param2));
-            
             if (newSDFVal < sdfVal)
             {
-                sdfVal = min(newSDFVal, sdfVal);
-                color = objects[i].color;
+                objIndex = i;
+                sdfVal = newSDFVal;
             }
         }
-    }
-    
-    for (i = 0; i < objectCount; i++)
-    {
-        if (objects[i].solidType == 1)
-        {
-            float newSDFVal = 2000000000;
-            float3 objPos = pt;
-        
-            if (objects[i].repeating)
-            {
-                float3 objRepeat = objects[i].repeatSize / 2;
-                objPos = float3(mod(objPos.x + objRepeat.x, objRepeat.x * 2) - objRepeat.x,
-                            mod(objPos.y + objRepeat.y, objRepeat.y * 2) - objRepeat.y,
-                            mod(objPos.z + objRepeat.z, objRepeat.z * 2) - objRepeat.z);
-            }
-            
-            if (objects[i].type == 0)
-                newSDFVal = sdfSphere(objPos - objects[i].position, objects[i].param0);
-            else
-                newSDFVal = sdfBox(objPos - objects[i].position, float3(objects[i].param0, objects[i].param1, objects[i].param2));
-            
+        else if (objects[i].solidType == 1)
             sdfVal = max(-newSDFVal, sdfVal);
-        }
     }
     
-    return float4(color, sdfVal);
+    return float2(sdfVal, objIndex);
 }
 
 // Calculates the normal from a sdf hit point
@@ -198,9 +220,9 @@ float3 calcNormal(float3 pt)
 {
     const float EPS = 0.0001f;
     const float2 h = float2(EPS, 0);
-    return normalize(float3(sampleSceneSDF(pt + h.xyy).w - sampleSceneSDF(pt - h.xyy).w,
-                           sampleSceneSDF(pt + h.yxy).w - sampleSceneSDF(pt - h.yxy).w,
-                           sampleSceneSDF(pt + h.yyx).w - sampleSceneSDF(pt - h.yyx).w));
+    return normalize(float3(sampleSceneSDF(pt + h.xyy).x - sampleSceneSDF(pt - h.xyy).x,
+                           sampleSceneSDF(pt + h.yxy).x - sampleSceneSDF(pt - h.yxy).x,
+                           sampleSceneSDF(pt + h.yyx).x - sampleSceneSDF(pt - h.yyx).x));
 }
 
 // Calculates the lighting amount based on a normal vector
@@ -209,42 +231,125 @@ float normalLighting(float3 normal)
     return clamp(dot(sunDir, normal), 0, 1);
 }
 
+// Calculates shadows
+// Adapted from: https://www.shadertoy.com/view/lsKcDD
+float softshadow(float3 rayOrigin, float3 rayDir, float minDist, float maxDist)
+{
+    float res = 1.0;
+    float rayDist = minDist;
+    
+    for (int i = 0; i < maxLightIterations && rayDist < maxDist; i++)
+    {
+        float sceneSDF = sampleSceneSDF(rayOrigin + rayDist * rayDir).x;
+        res = min(res, sceneSDF / (penumbraSize * rayDist));
+        rayDist += clamp(sceneSDF, 0.005, 0.50);
+        
+        if (res < -1.0 || rayDist > maxDist)
+            break;
+    }
+    
+    res = max(res, -1.0);
+    return 0.25 * (1.0 + res) * (1.0 + res) * (2.0 - res);
+}
+
+// Calculates ambient occlusion
+// Adapted from: https://www.shadertoy.com/view/lsKcDD
+float calcAO(float3 pos, float3 nor)
+{
+    float occ = 0.0;
+    float sca = 1.0;
+    
+    for (int i = 0; i < 5; i++)
+    {
+        float h = 0.001 + 0.15 * float(i) / 4.0;
+        float d = sampleSceneSDF(pos + h * nor).x;
+        occ += (h - d) * sca;
+        sca *= 0.95;
+    }
+    
+    return clamp(1.0 - 1.5 * occ, 0.0, 1.0);
+}
+
+// Vars for cone-tracing
+
+float camTanFov;
+float camPlaneSubdivisions;
+RWTexture2D<float2> coneResult;
+
+// Cone-tracing initial quick trace
+// Adapted from: https://medium.com/@nabilnymansour/cone-marching-in-three-js-6d54eac17ad4#:~:text=using%20cone%2Dmarching.-,The%20Algorithm,the%20cone%20has%20hit%20anything.
+float2 coneMarch(float3 cro, float3 crd)
+{
+    float d = camNearPlane; // total distance travelled
+    float cd; // current scene distance
+    float ccr; // current cone radius
+    float3 p; // current position of ray
+    uint i = 0; // steps iter
+    
+    for (i; i < maxIterations / 4u; ++i)
+    { // main loop
+        p = cro + d * crd; // calculate new position
+        cd = sampleSceneSDF(p).x; // get scene distance
+        ccr = (d * camTanFov) * 2. / camPlaneSubdivisions; // calculate cone radius
+        
+        // if current distance is less than cone radius with some padding or our distance is too big, break loop
+        if (cd < ccr * 1.25 || d >= camFarPlane)
+            break;
+
+        // otherwise, add new scene distance to total distance
+        d += cd;
+    }
+
+    return float2(d, i); // finally, return scene distance
+}
+
 // Debug vars
 
 int debugRayCount;
+int enableConeTracing;
 
 // Raymarches the scene
 [numthreads(8, 8, 1)]
 void RenderRaymarch(uint3 id : SV_DispatchThreadID)
-{
+{   
     // Get ray
     
     float2 percentOnTex = id.xy / size;
-    float3 curRayDir = getCamRayDir(percentOnTex * 2 - 1);
+    float3 rayDir = getCamRayDir(percentOnTex * 2 - 1);
     
     // Perform raymarching
     
     float depth = getCamDepth(id.xy);
     float distOnRay = camNearPlane;
-    
     int i = 0;
+    
+    if (enableConeTracing)
+    {
+        float2 coneMarchVars = coneMarch(cameraPos, rayDir);
+        distOnRay = coneMarchVars.x;
+        i = coneMarchVars.y;
+    }
+    
     for (i; i < maxIterations; i++)
     {
-        float3 curRayPt = cameraPos + (distOnRay * curRayDir);
-        float4 sceneVal = sampleSceneSDF(curRayPt);
+        float3 curRayPt = cameraPos + (distOnRay * rayDir);
+        float2 sceneVal = sampleSceneSDF(curRayPt);
         
-        if (sceneVal.w < resolution)
+        if (sceneVal.x < resolution)
         {
             float3 normal = calcNormal(curRayPt);
-            float lightAmt = normalLighting(normal) + ambientLight;
+            float shadow = softshadow(curRayPt, sunDir, 0.02, shadowRayMaxLength);
+            float lightAmt = (normalLighting(normal) * shadow + ambientLight) * calcAO(curRayPt, normal);
             
-            result[id.xy] = float4(sceneVal.rgb * lightAmt, 1);
+            result[id.xy] = float4(objects[sceneVal.y].color * lightAmt, 1);
             break;
         }
         
-        if (distOnRay / camFarPlane > depth)
+        //if (distOnRay / camFarPlane > depth)
+        //    break;
+        if (distOnRay > camFarPlane)
             break;
-        distOnRay += sceneVal.w;
+        distOnRay += sceneVal.x;
     }
     
     if (debugRayCount)

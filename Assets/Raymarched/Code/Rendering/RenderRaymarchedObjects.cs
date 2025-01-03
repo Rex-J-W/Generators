@@ -10,8 +10,9 @@ public struct RaymarchedObj
 {
     public int type;
     public int solidType;
-    public int repeating;
     public Vector3 position;
+    public Vector4 rotation;
+    public Vector3 scale;
     public Vector3 repeatSize;
     public Vector3 color;
     public float param0;
@@ -19,11 +20,12 @@ public struct RaymarchedObj
     public float param2;
     public float param3;
     public float param4;
-    public float param5;
-    public float param6;
-    public float param7;
-    public float param8;
-    public float param9;
+
+    public static int Compare(RaymarchedObj x, RaymarchedObj y)
+    {
+        if (x.solidType < y.solidType) return -1;
+        return x.solidType > y.solidType ? 1 : 0;
+    }
 }
 
 /// <summary>
@@ -32,13 +34,23 @@ public struct RaymarchedObj
 [Serializable, VolumeComponentMenu("Rendering/Raymarched Objects")]
 public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, IPostProcessComponent
 {
+    [Header("Rendering")]
     [Tooltip("Whether raymarched objects are enabled or not")]
     public BoolParameter enabled = new BoolParameter(false);
     public ClampedFloatParameter resolution = new ClampedFloatParameter(1e-05f, 0.0000001f, 0.0001f);
     public MinIntParameter maxIterations = new MinIntParameter(128, 8);
-    public FloatParameter ambientLight = new FloatParameter(0.1f);
+    public MinIntParameter conePlaneDivisions = new MinIntParameter(16, 2);
     [Space(7f)]
+    [Header("Lighting")]
+    public FloatParameter ambientLight = new FloatParameter(0.1f);
+    public MinFloatParameter shadowRayMaxLength = new MinFloatParameter(10f, 0.1f);
+    public MinFloatParameter penumbraSize = new MinFloatParameter(0.1f, 0f);
+    public MinIntParameter maxLightIterations = new MinIntParameter(128, 8);
+    [Space(7f)]
+    [Header("Debug")]
     public BoolParameter debugRayCount = new BoolParameter(false);
+    public BoolParameter enableConeTracing = new BoolParameter(false);
+    public BoolParameter debugObjectArray = new BoolParameter(false);
 
     private Material overlayMat;
     private ComputeShader raymarchShader;
@@ -100,6 +112,7 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
         // Set debug vars
 
         raymarchShader.SetInt("debugRayCount", debugRayCount.value ? 1 : 0);
+        raymarchShader.SetInt("enableConeTracing", enableConeTracing.value ? 1 : 0);
 
         // Set camera vars
 
@@ -111,13 +124,18 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
         raymarchShader.SetVector("size", new Vector2(output.width, output.height));
         raymarchShader.SetVector("cameraPos", cam.transform.position);
 
+        // Used for cone-tracing
+
+        raymarchShader.SetFloat("camTanFov", Mathf.Tan(Mathf.Deg2Rad * (cam.fieldOfView / 2f)));
+        raymarchShader.SetFloat("camPlaneSubdivisions", conePlaneDivisions.value);
+
         // Find raymarched objects
 
         raymarchedObjs = FindObjectsByType<RaymarchedGameObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.InstanceID);
         //if (raymarchedObjs.Length > 0 && prevBufferLength != raymarchedObjs.Length)
         //{
             objectsBuffer?.Release();
-            objectsBuffer = new ComputeBuffer(raymarchedObjs.Length, 88);
+            objectsBuffer = new ComputeBuffer(raymarchedObjs.Length, 92);
             prevBufferLength = raymarchedObjs.Length;
         //}
 
@@ -125,8 +143,26 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 
         RaymarchedObj[] raymarchObjData = new RaymarchedObj[raymarchedObjs.Length];
         for (int i = 0; i < raymarchedObjs.Length; i++)
+        {
             raymarchObjData[i] = raymarchedObjs[i].GetObjectData();
+            raymarchObjData[i].solidType = (int)raymarchedObjs[i].solidType;
+            raymarchObjData[i].repeatSize = raymarchedObjs[i].repetitionSize / 2f;
+            raymarchObjData[i].color = new Vector3(raymarchedObjs[i].color.r, raymarchedObjs[i].color.g, raymarchedObjs[i].color.b);
+            raymarchObjData[i].position = raymarchedObjs[i].transform.position;
+
+            Vector3 scale = raymarchedObjs[i].transform.lossyScale;
+            raymarchObjData[i].scale = new Vector3(1f / scale.x, 1f / scale.y, 1f / scale.z);
+
+            Quaternion rot = Quaternion.Inverse(raymarchedObjs[i].transform.rotation);
+            raymarchObjData[i].rotation = new Vector4(rot.x, rot.y, rot.z, rot.w);
+        }
+
+        // Sort objects by solid type
+
+        Array.Sort(raymarchObjData, RaymarchedObj.Compare);
         objectsBuffer.SetData(raymarchObjData);
+
+        if (debugObjectArray.value) DebugArray(raymarchObjData);
 
         raymarchShader.SetInt("objectCount", raymarchedObjs.Length);
         raymarchShader.SetBuffer(raymarchKernel, "objects", objectsBuffer);
@@ -135,8 +171,11 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
 
         raymarchShader.SetVector("sunDir", -sun.forward);
         raymarchShader.SetFloat("ambientLight", ambientLight.value);
+        raymarchShader.SetFloat("shadowRayMaxLength", shadowRayMaxLength.value);
+        raymarchShader.SetFloat("penumbraSize", penumbraSize.value);
         raymarchShader.SetFloat("resolution", resolution.value);
         raymarchShader.SetInt("maxIterations", maxIterations.value);
+        raymarchShader.SetInt("maxLightIterations", maxLightIterations.value);
         raymarchShader.SetTexture(raymarchKernel, "result", output);
         raymarchShader.SetTextureFromGlobal(raymarchKernel, "DepthTexture", "_CameraDepthTexture");
         raymarchShader.Dispatch(raymarchKernel, output.width / 8, output.height / 8, 1);
@@ -151,6 +190,20 @@ public sealed class RenderRaymarchedObjects : CustomPostProcessVolumeComponent, 
         // Release raymarched output texture
 
         RenderTexture.ReleaseTemporary(output);
+    }
+
+    /// <summary>
+    /// Debugs the raymarchedObj array
+    /// </summary>
+    /// <param name="objs">Debug array</param>
+    public void DebugArray(RaymarchedObj[] objs)
+    {
+        string arr = "";
+        for (int i = 0; i < objs.Length; i++)
+        {
+            arr += " (" + objs[i].type + " : " + objs[i].solidType + ") ";
+        }
+        Debug.Log(arr);
     }
 
     /// <summary>

@@ -18,14 +18,32 @@ MonoBehaviour:
     m_Value: 1
   resolution:
     m_OverrideState: 1
-    m_Value: 0.00001
+    m_Value: 0.0001
   maxIterations:
     m_OverrideState: 1
-    m_Value: 256
+    m_Value: 200
+  conePlaneDivisions:
+    m_OverrideState: 1
+    m_Value: 64
   ambientLight:
     m_OverrideState: 1
     m_Value: 0.1
+  shadowRayMaxLength:
+    m_OverrideState: 1
+    m_Value: 100
+  penumbraSize:
+    m_OverrideState: 1
+    m_Value: 1
+  maxLightIterations:
+    m_OverrideState: 1
+    m_Value: 32
   debugRayCount:
+    m_OverrideState: 1
+    m_Value: 0
+  enableConeTracing:
+    m_OverrideState: 1
+    m_Value: 0
+  debugObjectArray:
     m_OverrideState: 1
     m_Value: 0
 --- !u!114 &11400000
